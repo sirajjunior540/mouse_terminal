@@ -61,45 +61,48 @@ impl Executor {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Execute a command asynchronously
     pub fn execute(&mut self, command: &str) -> Result<()> {
         // Cancel any running command
         self.terminate();
-        
+
         // Reset the result
         self.result = ExecutionResult::default();
-        
+
+        // Clone the command string to avoid borrowing issues
+        let command = command.to_string();
+
         // Split the command into program and arguments
         let mut parts = command.split_whitespace();
-        let program = parts.next().ok_or_else(|| anyhow::anyhow!("Empty command"))?;
-        let args: Vec<&str> = parts.collect();
-        
+        let program = parts.next().ok_or_else(|| anyhow::anyhow!("Empty command"))?.to_string();
+        let args: Vec<String> = parts.map(|s| s.to_string()).collect();
+
         // Create channels for communication
         let (output_tx, output_rx) = mpsc::channel();
         let (terminate_tx, terminate_rx) = mpsc::channel();
-        
+
         self.output_rx = Some(output_rx);
         self.terminate_tx = Some(terminate_tx);
-        
+
         // Spawn a thread to run the command
         thread::spawn(move || {
-            let result = Self::run_command(program, &args, output_tx.clone(), terminate_rx);
-            
+            let result = Self::run_command(&program, &args, output_tx.clone(), terminate_rx);
+
             if let Err(e) = result {
                 // Send the error as stderr
                 let _ = output_tx.send(ExecutionOutput::Stderr(format!("Error: {}", e)));
                 let _ = output_tx.send(ExecutionOutput::Finished(Some(-1)));
             }
         });
-        
+
         Ok(())
     }
-    
+
     /// Run a command and capture its output
     fn run_command(
         program: &str,
-        args: &[&str],
+        args: &[String],
         output_tx: Sender<ExecutionOutput>,
         terminate_rx: Receiver<()>,
     ) -> Result<()> {
@@ -108,32 +111,33 @@ impl Executor {
         cmd.args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        
+
         // Start the command
         let mut child = cmd.spawn()?;
-        
+
         // Get stdout and stderr
         let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("Failed to capture stdout"))?;
         let stderr = child.stderr.take().ok_or_else(|| anyhow::anyhow!("Failed to capture stderr"))?;
-        
+
         // Create readers
         let stdout_reader = BufReader::new(stdout);
         let stderr_reader = BufReader::new(stderr);
-        
-        // Clone the sender for the stderr thread
+
+        // Clone the sender for the threads
         let stderr_tx = output_tx.clone();
-        
+        let stdout_tx = output_tx.clone();
+
         // Spawn a thread to read stdout
         let stdout_thread = thread::spawn(move || {
             for line in stdout_reader.lines() {
                 if let Ok(line) = line {
-                    if output_tx.send(ExecutionOutput::Stdout(line)).is_err() {
+                    if stdout_tx.send(ExecutionOutput::Stdout(line)).is_err() {
                         break;
                     }
                 }
             }
         });
-        
+
         // Spawn a thread to read stderr
         let stderr_thread = thread::spawn(move || {
             for line in stderr_reader.lines() {
@@ -144,7 +148,7 @@ impl Executor {
                 }
             }
         });
-        
+
         // Wait for the command to finish or be terminated
         let exit_status = loop {
             // Check if we should terminate
@@ -153,7 +157,7 @@ impl Executor {
                 let _ = child.kill();
                 break None;
             }
-            
+
             // Check if the process has finished
             match child.try_wait() {
                 Ok(Some(status)) => break Some(status),
@@ -164,22 +168,25 @@ impl Executor {
                 Err(_) => break None,
             }
         };
-        
+
         // Wait for the reader threads to finish
         let _ = stdout_thread.join();
         let _ = stderr_thread.join();
-        
+
         // Send the finished message
         let exit_code = exit_status.and_then(|s| s.code());
         let _ = output_tx.send(ExecutionOutput::Finished(exit_code));
-        
+
         Ok(())
     }
-    
+
     /// Check for new output from the command
     pub fn check_output(&mut self) -> bool {
         let mut updated = false;
-        
+        let mut finished = false;
+        let mut exit_code = None;
+
+        // Process all available output
         if let Some(rx) = &self.output_rx {
             // Check for new output
             while let Ok(output) = rx.try_recv() {
@@ -193,47 +200,54 @@ impl Executor {
                         updated = true;
                     }
                     ExecutionOutput::Finished(code) => {
-                        self.result.exit_code = code;
-                        self.output_rx = None;
-                        self.terminate_tx = None;
+                        exit_code = code;
+                        finished = true;
                         updated = true;
                     }
                 }
             }
         }
-        
+
+        // Handle finished state after processing all output
+        if finished {
+            self.result.exit_code = exit_code;
+            self.output_rx = None;
+            self.terminate_tx = None;
+        }
+
         updated
     }
-    
+
     /// Terminate the running command
     pub fn terminate(&mut self) {
         if let Some(tx) = self.terminate_tx.take() {
             let _ = tx.send(());
         }
-        
+
         self.output_rx = None;
     }
-    
+
     /// Check if a command is currently running
     pub fn is_running(&self) -> bool {
         self.output_rx.is_some()
     }
-    
+
     /// Get the current execution result
+    #[allow(dead_code)]
     pub fn result(&self) -> &ExecutionResult {
         &self.result
     }
-    
+
     /// Get all output lines (stdout and stderr combined)
     pub fn all_output(&self) -> Vec<String> {
         let mut output = Vec::new();
-        
+
         // Add stdout
         output.extend(self.result.stdout.clone());
-        
+
         // Add stderr
         output.extend(self.result.stderr.clone());
-        
+
         output
     }
 }
