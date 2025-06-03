@@ -92,6 +92,9 @@ impl App {
 
                     // Update the file list
                     ui::update_file_list(&mut self.ui_state)?;
+
+                    // Set the needs_refresh flag to trigger a UI update
+                    self.ui_state.needs_refresh = true;
                 }
             }
 
@@ -144,9 +147,74 @@ impl App {
                         self.ui_state.sudo_password.clear();
                         self.ui_state.sudo_password_prompt = false;
 
-                        // Execute the command with the password
-                        self.executor.execute_sudo(&cmd, &password)?;
-                        self.ui_state.is_running = true;
+                        // Check if this is a nano command
+                        if cmd.starts_with("sudo nano ") {
+                            // Extract the filename
+                            let parts: Vec<&str> = cmd.split_whitespace().collect();
+                            if parts.len() >= 3 {
+                                let filename = parts[2];
+                                let file_path = if filename.starts_with('/') {
+                                    std::path::PathBuf::from(filename)
+                                } else {
+                                    self.ui_state.current_dir.join(filename)
+                                };
+
+                                // Clear previous output
+                                self.ui_state.output.clear();
+
+                                // Add file name as header
+                                self.ui_state.output.push(format!("File: {}", file_path.display()));
+                                self.ui_state.output.push(String::from("-----------------------------------"));
+
+                                // Try to read the file content with sudo
+                                let output = std::process::Command::new("sudo")
+                                    .arg("-S")
+                                    .arg("cat")
+                                    .arg(&file_path)
+                                    .stdin(std::process::Stdio::piped())
+                                    .stdout(std::process::Stdio::piped())
+                                    .stderr(std::process::Stdio::piped())
+                                    .spawn()
+                                    .and_then(|mut child| {
+                                        if let Some(mut stdin) = child.stdin.take() {
+                                            use std::io::Write;
+                                            stdin.write_all(format!("{}\n", password).as_bytes())?;
+                                        }
+                                        child.wait_with_output()
+                                    });
+
+                                match output {
+                                    Ok(output) => {
+                                        if output.status.success() {
+                                            // Convert output to string and split by lines
+                                            if let Ok(content) = String::from_utf8(output.stdout) {
+                                                for line in content.lines() {
+                                                    self.ui_state.output.push(line.to_string());
+                                                }
+                                            } else {
+                                                self.ui_state.output.push(String::from("Error: File contains non-UTF8 characters"));
+                                            }
+                                        } else {
+                                            // Command failed
+                                            if let Ok(err) = String::from_utf8(output.stderr) {
+                                                self.ui_state.output.push(format!("Error: {}", err));
+                                            } else {
+                                                self.ui_state.output.push(String::from("Error: Failed to read file with sudo"));
+                                            }
+                                        }
+                                    },
+                                    Err(e) => {
+                                        self.ui_state.output.push(format!("Error executing sudo: {}", e));
+                                    }
+                                }
+                            } else {
+                                self.ui_state.output.push(String::from("Error: Invalid nano command format"));
+                            }
+                        } else {
+                            // Execute other sudo commands normally
+                            self.executor.execute_sudo(&cmd, &password)?;
+                            self.ui_state.is_running = true;
+                        }
 
                         // Set the needs_refresh flag to trigger a UI update
                         self.ui_state.needs_refresh = true;
@@ -352,14 +420,40 @@ impl App {
                                 // Set the needs_refresh flag to trigger a UI update
                                 self.ui_state.needs_refresh = true;
                             } else {
-                                // Click on a file - open with editor
-                                let edit_command = format!("sudo nano {}", file.name);
-                                self.history.add(edit_command.clone());
+                                // Click on a file - read and display its content
+                                let file_path = self.ui_state.current_dir.join(&file.name);
 
-                                // Prompt for password since this is a sudo command
-                                self.ui_state.sudo_password_prompt = true;
-                                self.ui_state.sudo_command = Some(edit_command.clone());
-                                self.input_state.clear();
+                                // Clear previous output
+                                self.ui_state.output.clear();
+
+                                // Add file name as header
+                                self.ui_state.output.push(format!("File: {}", file_path.display()));
+                                self.ui_state.output.push(String::from("-----------------------------------"));
+
+                                // Try to read the file content
+                                match std::fs::read_to_string(&file_path) {
+                                    Ok(content) => {
+                                        // Split content by lines and add to output
+                                        for line in content.lines() {
+                                            self.ui_state.output.push(line.to_string());
+                                        }
+                                    },
+                                    Err(e) => {
+                                        // Handle error (e.g., permission denied)
+                                        self.ui_state.output.push(format!("Error reading file: {}", e));
+
+                                        // If permission denied, suggest using sudo
+                                        if e.kind() == std::io::ErrorKind::PermissionDenied {
+                                            self.ui_state.output.push(String::from(""));
+                                            self.ui_state.output.push(String::from("This file requires elevated permissions to read."));
+                                            self.ui_state.output.push(String::from("Try using the terminal command: sudo cat <filename>"));
+                                        }
+                                    }
+                                }
+
+                                // Add to history
+                                let view_command = format!("view {}", file.name);
+                                self.history.add(view_command);
 
                                 // Set the needs_refresh flag to trigger a UI update
                                 self.ui_state.needs_refresh = true;
