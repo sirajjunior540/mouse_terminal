@@ -1,0 +1,46 @@
+# mouse_term configuration
+
+[general]
+# Maximum number of history entries to keep
+max_history = 500
+
+[colors]
+# Color theme (dark or light)
+theme = "dark"
+
+# Dark theme colors
+[colors.dark]
+background = "#1a1a1a"
+foreground = "#d0d0d0"
+selection = "#3a3d41"
+cursor = "#ffffff"
+token_normal = "#d0d0d0"
+token_hover = "#61afef"
+token_editing = "#e5c07b"
+history_selected = "#61afef"
+command_output = "#98c379"
+error_output = "#e06c75"
+
+# Light theme colors (uncomment to use)
+# [colors.light]
+# background = "#f0f0f0"
+# foreground = "#333333"
+# selection = "#b3d7ff"
+# cursor = "#000000"
+# token_normal = "#333333"
+# token_hover = "#2472c8"
+# token_editing = "#c18401"
+# history_selected = "#2472c8"
+# command_output = "#50a14f"
+# error_output = "#e45649"
+
+[keybindings]
+# Key bindings for various actions
+quit = "ctrl+c"
+clear_screen = "ctrl+l"
+toggle_history = "f2"
+history_prev = "up"
+history_next = "down"
+cancel_edit = "esc"
+commit_edit = "enter"
+execute_command = "enter"
