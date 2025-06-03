@@ -341,6 +341,14 @@ impl App {
                                 self.ui_state.is_running = true;
                                 self.input_state.clear();
 
+                                // Update the current directory directly
+                                let new_dir = self.ui_state.current_dir.join(&file.name);
+                                if new_dir.exists() && new_dir.is_dir() {
+                                    self.ui_state.current_dir = new_dir;
+                                    // Update the file list
+                                    ui::update_file_list(&mut self.ui_state)?;
+                                }
+
                                 // Set the needs_refresh flag to trigger a UI update
                                 self.ui_state.needs_refresh = true;
                             } else {
