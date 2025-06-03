@@ -40,6 +40,8 @@ pub struct UiState {
     pub spinner_frame: usize,
     /// Last update time for spinner
     pub last_spinner_update: std::time::Instant,
+    /// Whether the UI needs to be refreshed
+    pub needs_refresh: bool,
 }
 
 /// Information about a file or folder
@@ -70,6 +72,7 @@ impl Default for UiState {
             sudo_command: None,
             spinner_frame: 0,
             last_spinner_update: std::time::Instant::now(),
+            needs_refresh: false,
         }
     }
 }
@@ -116,38 +119,69 @@ impl FileInfo {
     }
 }
 
-/// Renders the entire UI
-pub fn render(frame: &mut Frame, ui_state: &mut UiState, input_state: &InputState, history: &History) {
-    let size = frame.size();
+/// Calculate the layout for the UI
+pub fn calculate_layout(size: Rect, show_history: bool) -> (Rect, Rect, Rect, Option<Rect>) {
+    // Ensure minimum height for each section
+    let _min_output_height = 5;
+    let status_bar_height = 2;
+    let min_input_height = 3;
+
+    // Calculate available height
+    let available_height = size.height.saturating_sub(status_bar_height);
+
+    // Calculate input height (minimum 3 lines or 15% of available height, whichever is larger)
+    let input_height = std::cmp::max(
+        min_input_height,
+        (available_height as f32 * 0.15) as u16
+    );
+
+    // Calculate main viewport height
+    let main_height = available_height.saturating_sub(input_height);
 
     // Create the main layout (vertical split)
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(83), // Main viewport
-            Constraint::Length(2),      // Status bar
-            Constraint::Percentage(15), // Input line
+            Constraint::Min(main_height),     // Main viewport
+            Constraint::Length(status_bar_height), // Status bar
+            Constraint::Min(input_height),    // Input line
         ])
         .split(size);
 
     // If history sidebar is enabled, create a horizontal split for the main area
-    let (main_area, input_area) = if ui_state.show_history {
+    if show_history {
+        // Calculate history width (30% of screen width, minimum 20 columns)
+        let history_width = std::cmp::max(20, (size.width as f32 * 0.3) as u16);
+        let main_width = size.width.saturating_sub(history_width);
+
         let horizontal_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(70), // Main viewport
-                Constraint::Percentage(30), // History sidebar
+                Constraint::Min(main_width),    // Main viewport
+                Constraint::Min(history_width), // History sidebar
             ])
             .split(chunks[0]);
 
-        render_history(frame, horizontal_chunks[1], history);
-        (horizontal_chunks[0], chunks[2])
+        (horizontal_chunks[0], chunks[1], chunks[2], Some(horizontal_chunks[1]))
     } else {
-        (chunks[0], chunks[2])
-    };
+        (chunks[0], chunks[1], chunks[2], None)
+    }
+}
+
+/// Renders the entire UI
+pub fn render(frame: &mut Frame, ui_state: &mut UiState, input_state: &InputState, history: &History) {
+    let size = frame.size();
+
+    // Calculate layout
+    let (main_area, status_area, input_area, history_area) = calculate_layout(size, ui_state.show_history);
+
+    // Render history if enabled
+    if let Some(history_area) = history_area {
+        render_history(frame, history_area, history);
+    }
 
     render_output(frame, main_area, ui_state);
-    render_status_bar(frame, chunks[1], ui_state);
+    render_status_bar(frame, status_area, ui_state);
     render_input(frame, input_area, input_state, ui_state);
 
     // If we're waiting for a sudo password, render the password prompt
@@ -167,34 +201,73 @@ pub fn render(frame: &mut Frame, ui_state: &mut UiState, input_state: &InputStat
 
 /// Renders the output viewport
 fn render_output(frame: &mut Frame, area: Rect, ui_state: &UiState) {
-    // Split the area into two parts: output and file list
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(60), // Command output
-            Constraint::Percentage(40), // File list
-        ])
-        .split(area);
+    // Ensure minimum heights for output and file list
+    let min_output_height = 3;
+    let min_file_list_height = 3;
 
-    // Render command output
-    let output_text: Vec<String> = ui_state.output
-        .iter()
-        .map(|line| line.clone())
-        .collect();
+    // Calculate available height
+    let available_height = area.height;
 
-    let output_widget = Paragraph::new(output_text.join("\n"))
-        .block(Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Cyan))
-            .title(format!(" 📺 Output - {} ", ui_state.current_dir.display()))
-            .title_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)))
-        .wrap(Wrap { trim: true });
+    // If we have enough space for both sections with minimum heights
+    if available_height >= min_output_height + min_file_list_height {
+        // Calculate output height (60% of available space, but at least min_output_height)
+        let output_height = std::cmp::max(
+            min_output_height,
+            (available_height as f32 * 0.6) as u16
+        );
 
-    frame.render_widget(output_widget, chunks[0]);
+        // Calculate file list height (remaining space, but at least min_file_list_height)
+        let file_list_height = std::cmp::max(
+            min_file_list_height,
+            available_height.saturating_sub(output_height)
+        );
 
-    // Render file list
-    render_file_list(frame, chunks[1], ui_state);
+        // Split the area into two parts: output and file list
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(output_height),     // Command output
+                Constraint::Min(file_list_height),  // File list
+            ])
+            .split(area);
+
+        // Render command output
+        let output_text: Vec<String> = ui_state.output
+            .iter()
+            .map(|line| line.clone())
+            .collect();
+
+        let output_widget = Paragraph::new(output_text.join("\n"))
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(format!(" 📺 Output - {} ", ui_state.current_dir.display()))
+                .title_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)))
+            .wrap(Wrap { trim: true });
+
+        frame.render_widget(output_widget, chunks[0]);
+
+        // Render file list
+        render_file_list(frame, chunks[1], ui_state);
+    } else {
+        // Not enough space for both sections, just show output
+        let output_text: Vec<String> = ui_state.output
+            .iter()
+            .map(|line| line.clone())
+            .collect();
+
+        let output_widget = Paragraph::new(output_text.join("\n"))
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(format!(" 📺 Output - {} ", ui_state.current_dir.display()))
+                .title_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)))
+            .wrap(Wrap { trim: true });
+
+        frame.render_widget(output_widget, area);
+    }
 }
 
 /// Renders the file list
@@ -315,6 +388,11 @@ pub fn get_token_at_position(
     x: u16,
     input_area: Rect,
 ) -> Option<usize> {
+    // Check if the click is within the input area's horizontal bounds
+    if x < input_area.x || x >= input_area.x + input_area.width {
+        return None;
+    }
+
     // Account for the border and any padding
     let effective_x = x.saturating_sub(input_area.x + 1);
 
@@ -340,6 +418,11 @@ pub fn get_file_at_position(
     y: u16,
     file_area: Rect,
 ) -> Option<usize> {
+    // Check if the click is within the file area's vertical bounds
+    if y < file_area.y || y >= file_area.y + file_area.height {
+        return None;
+    }
+
     // Account for the border and any padding
     let effective_y = y.saturating_sub(file_area.y + 1);
 
@@ -436,9 +519,29 @@ fn render_status_bar(frame: &mut Frame, area: Rect, ui_state: &UiState) {
 
 /// Renders the sudo password prompt
 fn render_sudo_password_prompt(frame: &mut Frame, size: Rect, ui_state: &UiState) {
-    // Create a centered box for the password prompt
-    let width = 50;
-    let height = 5;
+    // Create a semi-transparent overlay for the entire screen
+    let overlay = Block::default()
+        .style(Style::default().bg(Color::Black).fg(Color::White));
+    frame.render_widget(overlay, size);
+
+    // Calculate adaptive dimensions for the password prompt
+    // Width: 50% of screen width, but at least 40 columns and at most 80 columns
+    let width = std::cmp::min(
+        80,
+        std::cmp::max(40, (size.width as f32 * 0.5) as u16)
+    );
+
+    // Height: 30% of screen height, but at least 5 rows and at most 10 rows
+    let height = std::cmp::min(
+        10,
+        std::cmp::max(5, (size.height as f32 * 0.3) as u16)
+    );
+
+    // Ensure the prompt fits on screen
+    let width = std::cmp::min(width, size.width.saturating_sub(4));
+    let height = std::cmp::min(height, size.height.saturating_sub(4));
+
+    // Center the prompt
     let x = (size.width.saturating_sub(width)) / 2;
     let y = (size.height.saturating_sub(height)) / 2;
 
@@ -446,9 +549,13 @@ fn render_sudo_password_prompt(frame: &mut Frame, size: Rect, ui_state: &UiState
 
     // Create the password field with masked input
     let masked_password = "*".repeat(ui_state.sudo_password.len());
-    let password_text = format!("Password: {}", masked_password);
+    let cursor = if ui_state.spinner_frame % 2 == 0 { "█" } else { " " }; // Blinking cursor
+    let password_text = format!("Password: {}{}", masked_password, cursor);
 
-    let password_widget = Paragraph::new(password_text)
+    // Add instructions
+    let instructions = "\n\nPress Enter to submit or Esc to cancel";
+
+    let password_widget = Paragraph::new(format!("{}{}", password_text, instructions))
         .block(Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)

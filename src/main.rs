@@ -99,6 +99,15 @@ impl App {
             if last_tick.elapsed() >= tick_rate {
                 last_tick = Instant::now();
             }
+
+            // Check if the UI needs to be refreshed
+            if self.ui_state.needs_refresh {
+                // Reset the flag
+                self.ui_state.needs_refresh = false;
+
+                // Force a UI refresh
+                terminal.draw(|f| ui::render(f, &mut self.ui_state, &self.input_state, &self.history))?;
+            }
         }
     }
 
@@ -123,6 +132,9 @@ impl App {
                     self.ui_state.sudo_password_prompt = false;
                     self.ui_state.sudo_password.clear();
                     self.ui_state.sudo_command = None;
+
+                    // Set the needs_refresh flag to trigger a UI update
+                    self.ui_state.needs_refresh = true;
                 }
                 KeyCode::Enter => {
                     // Submit the password
@@ -135,15 +147,22 @@ impl App {
                         // Execute the command with the password
                         self.executor.execute_sudo(&cmd, &password)?;
                         self.ui_state.is_running = true;
+
+                        // Set the needs_refresh flag to trigger a UI update
+                        self.ui_state.needs_refresh = true;
                     }
                 }
                 KeyCode::Char(c) => {
                     // Add character to the password
                     self.ui_state.sudo_password.push(c);
+                    // Set the needs_refresh flag to trigger a UI update
+                    self.ui_state.needs_refresh = true;
                 }
                 KeyCode::Backspace => {
                     // Remove character from the password
                     self.ui_state.sudo_password.pop();
+                    // Set the needs_refresh flag to trigger a UI update
+                    self.ui_state.needs_refresh = true;
                 }
                 _ => {}
             }
@@ -262,114 +281,150 @@ impl App {
             MouseEventKind::Down(_) => {
                 // Get the terminal size
                 let size = crossterm::terminal::size()?;
-                let terminal_height = size.1;
+                let term_rect = ratatui::layout::Rect::new(0, 0, size.0, size.1);
 
-                // Calculate the input area
-                let input_start_y = (terminal_height as f32 * 0.85) as u16;
+                // Calculate layout using the same function as rendering
+                let (main_area, _, input_area, history_area) = ui::calculate_layout(term_rect, self.ui_state.show_history);
 
-                // Calculate the file list area
-                let file_list_start_y = (terminal_height as f32 * 0.51) as u16; // 85% * 60% = 51%
-                let file_list_end_y = input_start_y;
+                // Calculate output and file list areas
+                let (_output_area, file_list_area) = if main_area.height >= 6 { // Minimum height for both sections
+                    let output_height = std::cmp::max(3, (main_area.height as f32 * 0.6) as u16);
+                    let file_list_height = std::cmp::max(3, main_area.height.saturating_sub(output_height));
 
-                if mouse.row >= input_start_y {
+                    let chunks = ratatui::layout::Layout::default()
+                        .direction(ratatui::layout::Direction::Vertical)
+                        .constraints([
+                            ratatui::layout::Constraint::Min(output_height),
+                            ratatui::layout::Constraint::Min(file_list_height),
+                        ])
+                        .split(main_area);
+
+                    (Some(chunks[0]), Some(chunks[1]))
+                } else {
+                    (Some(main_area), None)
+                };
+
+                if mouse.row >= input_area.y && mouse.row < input_area.y + input_area.height {
                     // Click in the input area
                     if let Some(token_idx) = ui::get_token_at_position(
                         &self.input_state,
                         mouse.column,
-                        ratatui::layout::Rect::new(0, input_start_y, size.0, terminal_height - input_start_y),
+                        input_area,
                     ) {
                         // Start editing the token
                         self.input_state.start_editing(token_idx)?;
                         self.ui_state.editing_token = Some(token_idx);
                     }
-                } else if mouse.row >= file_list_start_y && mouse.row < file_list_end_y && !self.ui_state.show_history {
-                    // Click in the file list area (only if history sidebar is not shown)
-                    let file_area = ratatui::layout::Rect::new(0, file_list_start_y, size.0, file_list_end_y - file_list_start_y);
-
-                    if let Some(file_idx) = ui::get_file_at_position(&self.ui_state, mouse.row, file_area) {
-                        let file = &self.ui_state.files[file_idx];
-
-                        if file.is_dir {
-                            // Click on a directory - cd into it
-                            let cd_command = format!("cd {}", file.name);
-                            self.history.add(cd_command.clone());
-                            self.executor.execute(&cd_command)?;
-                            self.ui_state.is_running = true;
-                            self.input_state.clear();
+                } else if let Some(file_area) = file_list_area {
+                    if mouse.row >= file_area.y && mouse.row < file_area.y + file_area.height {
+                        // Click in the file list area
+                        let effective_file_area = if self.ui_state.show_history {
+                            // Adjust width if history sidebar is shown
+                            ratatui::layout::Rect::new(
+                                file_area.x,
+                                file_area.y,
+                                file_area.width,
+                                file_area.height
+                            )
                         } else {
-                            // Click on a file - open with editor
-                            let edit_command = format!("sudo nano {}", file.name);
-                            self.history.add(edit_command.clone());
+                            file_area
+                        };
 
-                            // Prompt for password since this is a sudo command
-                            self.ui_state.sudo_password_prompt = true;
-                            self.ui_state.sudo_command = Some(edit_command.clone());
-                            self.input_state.clear();
+                        if let Some(file_idx) = ui::get_file_at_position(&self.ui_state, mouse.row, effective_file_area) {
+                            let file = &self.ui_state.files[file_idx];
+
+                            if file.is_dir {
+                                // Click on a directory - cd into it
+                                let cd_command = format!("cd {}", file.name);
+                                self.history.add(cd_command.clone());
+                                self.executor.execute(&cd_command)?;
+                                self.ui_state.is_running = true;
+                                self.input_state.clear();
+
+                                // Set the needs_refresh flag to trigger a UI update
+                                self.ui_state.needs_refresh = true;
+                            } else {
+                                // Click on a file - open with editor
+                                let edit_command = format!("sudo nano {}", file.name);
+                                self.history.add(edit_command.clone());
+
+                                // Prompt for password since this is a sudo command
+                                self.ui_state.sudo_password_prompt = true;
+                                self.ui_state.sudo_command = Some(edit_command.clone());
+                                self.input_state.clear();
+
+                                // Set the needs_refresh flag to trigger a UI update
+                                self.ui_state.needs_refresh = true;
+                            }
                         }
                     }
-                } else if self.ui_state.show_history && mouse.column > (size.0 as f32 * 0.7) as u16 {
-                    // Click in the history sidebar
-                    let history_idx = mouse.row as usize;
-                    if history_idx < self.history.len() {
-                        if let Some(cmd) = self.history.get(history_idx) {
-                            self.input_state.set_input(cmd.clone())?;
-                        }
-                    }
-                } else if mouse.row >= file_list_start_y && mouse.row < file_list_end_y && self.ui_state.show_history {
-                    // Click in the file list area when history sidebar is shown
-                    let file_area = ratatui::layout::Rect::new(0, file_list_start_y, (size.0 as f32 * 0.7) as u16, file_list_end_y - file_list_start_y);
-
-                    if let Some(file_idx) = ui::get_file_at_position(&self.ui_state, mouse.row, file_area) {
-                        let file = &self.ui_state.files[file_idx];
-
-                        if file.is_dir {
-                            // Click on a directory - cd into it
-                            let cd_command = format!("cd {}", file.name);
-                            self.history.add(cd_command.clone());
-                            self.executor.execute(&cd_command)?;
-                            self.ui_state.is_running = true;
-                            self.input_state.clear();
-                        } else {
-                            // Click on a file - open with editor
-                            let edit_command = format!("sudo nano {}", file.name);
-                            self.history.add(edit_command.clone());
-
-                            // Prompt for password since this is a sudo command
-                            self.ui_state.sudo_password_prompt = true;
-                            self.ui_state.sudo_command = Some(edit_command.clone());
-                            self.input_state.clear();
+                } else if let Some(history_area) = history_area {
+                    if mouse.row >= history_area.y && mouse.row < history_area.y + history_area.height {
+                        // Click in the history sidebar
+                        let history_idx = (mouse.row - history_area.y) as usize;
+                        if history_idx < self.history.len() {
+                            if let Some(cmd) = self.history.get(history_idx) {
+                                self.input_state.set_input(cmd.clone())?;
+                            }
                         }
                     }
                 }
             }
             MouseEventKind::Moved => {
-                // Update hover state
+                // Get the terminal size
                 let size = crossterm::terminal::size()?;
-                let terminal_height = size.1;
-                let input_start_y = (terminal_height as f32 * 0.85) as u16;
+                let term_rect = ratatui::layout::Rect::new(0, 0, size.0, size.1);
 
-                // Calculate the file list area
-                let file_list_start_y = (terminal_height as f32 * 0.51) as u16; // 85% * 60% = 51%
-                let file_list_end_y = input_start_y;
+                // Calculate layout using the same function as rendering
+                let (main_area, _, input_area, _) = ui::calculate_layout(term_rect, self.ui_state.show_history);
 
-                if mouse.row >= input_start_y {
+                // Calculate output and file list areas
+                let (_, file_list_area) = if main_area.height >= 6 { // Minimum height for both sections
+                    let output_height = std::cmp::max(3, (main_area.height as f32 * 0.6) as u16);
+                    let file_list_height = std::cmp::max(3, main_area.height.saturating_sub(output_height));
+
+                    let chunks = ratatui::layout::Layout::default()
+                        .direction(ratatui::layout::Direction::Vertical)
+                        .constraints([
+                            ratatui::layout::Constraint::Min(output_height),
+                            ratatui::layout::Constraint::Min(file_list_height),
+                        ])
+                        .split(main_area);
+
+                    (Some(chunks[0]), Some(chunks[1]))
+                } else {
+                    (Some(main_area), None)
+                };
+
+                if mouse.row >= input_area.y && mouse.row < input_area.y + input_area.height {
                     // Mouse over the input area
                     self.ui_state.hover_token = ui::get_token_at_position(
                         &self.input_state,
                         mouse.column,
-                        ratatui::layout::Rect::new(0, input_start_y, size.0, terminal_height - input_start_y),
+                        input_area,
                     );
                     self.ui_state.hover_file = None;
-                } else if mouse.row >= file_list_start_y && mouse.row < file_list_end_y {
-                    // Mouse over the file list area
-                    let file_area = if self.ui_state.show_history {
-                        ratatui::layout::Rect::new(0, file_list_start_y, (size.0 as f32 * 0.7) as u16, file_list_end_y - file_list_start_y)
-                    } else {
-                        ratatui::layout::Rect::new(0, file_list_start_y, size.0, file_list_end_y - file_list_start_y)
-                    };
+                } else if let Some(file_area) = file_list_area {
+                    if mouse.row >= file_area.y && mouse.row < file_area.y + file_area.height {
+                        // Mouse over the file list area
+                        let effective_file_area = if self.ui_state.show_history {
+                            // Adjust width if history sidebar is shown
+                            ratatui::layout::Rect::new(
+                                file_area.x,
+                                file_area.y,
+                                file_area.width,
+                                file_area.height
+                            )
+                        } else {
+                            file_area
+                        };
 
-                    self.ui_state.hover_file = ui::get_file_at_position(&self.ui_state, mouse.row, file_area);
-                    self.ui_state.hover_token = None;
+                        self.ui_state.hover_file = ui::get_file_at_position(&self.ui_state, mouse.row, effective_file_area);
+                        self.ui_state.hover_token = None;
+                    } else {
+                        self.ui_state.hover_token = None;
+                        self.ui_state.hover_file = None;
+                    }
                 } else {
                     self.ui_state.hover_token = None;
                     self.ui_state.hover_file = None;
