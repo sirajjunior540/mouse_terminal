@@ -8,6 +8,10 @@ A cross-platform, mouse-driven terminal emulator built with Rust. This terminal 
 
 - **Mouse-driven command editing**: Click on any token in the command line to edit it directly
 - **Clickable command history**: Access and reuse previous commands with a click
+- **File manager view**: Browse files and folders with icons, click to navigate or open files
+- **Secure sudo handling**: Password masking and session caching for sudo commands
+- **History backup**: Automatic timestamped backups of command history
+- **Modern UI**: Powerline-style status bar, loading spinners, and rounded corners
 - **Cross-platform support**: Works on macOS, Linux, and Windows
 - **Customizable**: Configure colors, keybindings, and more via config file
 - **Keyboard parity**: Still supports classic terminal navigation (arrows, Ctrl+A/E, etc.)
@@ -42,11 +46,17 @@ A cross-platform, mouse-driven terminal emulator built with Rust. This terminal 
 ### Basic Navigation
 
 - **Mouse click**: Click on any token to edit it
+- **Click on folder**: Navigate to that directory
+- **Click on file**: Open the file with sudo nano
 - **Enter**: Execute the current command
-- **F2**: Toggle history sidebar
+- **F2** or **Ctrl+H**: Toggle history sidebar
 - **Up/Down arrows**: Navigate through command history
 - **Ctrl+C**: Exit the application
 - **Ctrl+L**: Clear the screen
+
+### Built-in Commands
+
+- **cd [directory]**: Change the current working directory. If no directory is specified, changes to the home directory.
 
 ### Configuration
 
@@ -82,8 +92,40 @@ mouse_term is built with a modular architecture:
 
 - **ui.rs**: Drawing code and widgets using ratatui
 - **input.rs**: Tokenization and inline editor state machine
-- **history.rs**: Command history management with load/save functionality
-- **executor.rs**: Command execution in child processes
+- **history.rs**: Command history management with load/save functionality and backups
+- **executor.rs**: Command execution in child processes, including sudo handling
+
+## New Features
+
+### File Manager View
+
+The terminal now includes a built-in file manager view that:
+- Shows files and folders with appropriate icons
+- Displays file sizes and modification times
+- Allows clicking on folders to navigate to them
+- Allows clicking on files to open them with an editor
+
+### Sudo Password Handling
+
+When running commands that require sudo:
+- A secure password prompt is displayed
+- Password input is masked for security
+- Sudo sessions are cached for 15 minutes to avoid repeated password entry
+
+### History Backup
+
+Command history is now automatically backed up:
+- Timestamped backups are stored in ~/.mouse_term/history_backups/
+- Backups are created whenever history is saved
+- History can be restored from backups if needed
+
+### Modern UI
+
+The UI has been modernized with:
+- Rounded corners and colorful borders
+- A powerline-style status bar showing current directory and time
+- Loading spinners for running commands
+- Breadcrumb-style directory navigation
 
 ## Extending mouse_term
 

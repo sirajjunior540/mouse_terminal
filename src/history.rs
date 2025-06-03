@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use chrono::Local;
 
 /// Default maximum number of history entries to keep
 const DEFAULT_MAX_HISTORY: usize = 500;
@@ -148,12 +149,45 @@ impl History {
                 fs::create_dir_all(parent)?;
             }
 
+            // Create a backup before saving
+            self.create_backup()?;
+
             // Serialize to JSON
             let json = serde_json::to_string(self)?;
 
             // Write to file
             let mut file = File::create(history_path)?;
             file.write_all(json.as_bytes())?;
+        }
+
+        Ok(())
+    }
+
+    /// Create a backup of the history file
+    pub fn create_backup(&self) -> Result<()> {
+        let default_path = Self::default_history_path().ok().flatten();
+        if let Some(history_path) = self.history_file.as_ref().or(default_path.as_ref()) {
+            // Check if the history file exists
+            if !history_path.exists() {
+                return Ok(());
+            }
+
+            // Create the backup directory
+            let backup_dir = dirs::home_dir()
+                .map(|home| home.join(".mouse_term").join("history_backups"))
+                .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+
+            fs::create_dir_all(&backup_dir)?;
+
+            // Generate a timestamp for the backup file
+            let now = Local::now();
+            let timestamp = now.format("%Y%m%d_%H%M%S").to_string();
+
+            // Create the backup file path
+            let backup_path = backup_dir.join(format!("history_{}.json", timestamp));
+
+            // Copy the history file to the backup file
+            fs::copy(history_path, backup_path)?;
         }
 
         Ok(())
@@ -189,5 +223,69 @@ impl History {
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
+    }
+
+    /// Search for commands in history that contain the given query
+    #[allow(dead_code)]
+    pub fn search(&self, query: &str) -> Vec<String> {
+        let query = query.to_lowercase();
+        self.commands
+            .iter()
+            .filter(|cmd| cmd.to_lowercase().contains(&query))
+            .cloned()
+            .collect()
+    }
+
+    /// Get the path to the backup directory
+    #[allow(dead_code)]
+    pub fn backup_dir() -> Result<PathBuf> {
+        dirs::home_dir()
+            .map(|home| home.join(".mouse_term").join("history_backups"))
+            .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))
+    }
+
+    /// List all available backups
+    #[allow(dead_code)]
+    pub fn list_backups() -> Result<Vec<PathBuf>> {
+        let backup_dir = Self::backup_dir()?;
+
+        if !backup_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut backups = Vec::new();
+        for entry in fs::read_dir(backup_dir)? {
+            if let Ok(entry) = entry {
+                let path = entry.path();
+                if path.is_file() && path.extension().map_or(false, |ext| ext == "json") {
+                    backups.push(path);
+                }
+            }
+        }
+
+        // Sort backups by modification time (newest first)
+        backups.sort_by(|a, b| {
+            let a_time = fs::metadata(a).and_then(|m| m.modified()).ok();
+            let b_time = fs::metadata(b).and_then(|m| m.modified()).ok();
+            b_time.cmp(&a_time)
+        });
+
+        Ok(backups)
+    }
+
+    /// Restore history from a backup file
+    #[allow(dead_code)]
+    pub fn restore_from_backup(backup_path: &PathBuf) -> Result<Self> {
+        let mut file = File::open(backup_path)?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)?;
+
+        // Parse the JSON
+        let mut history: Self = serde_json::from_str(&contents)?;
+
+        // Set the history file path to the default
+        history.history_file = Self::default_history_path().ok().flatten();
+
+        Ok(history)
     }
 }

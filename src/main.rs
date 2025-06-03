@@ -57,10 +57,13 @@ impl App {
         let tick_rate = Duration::from_millis(100);
         let mut last_tick = Instant::now();
 
+        // Initialize the file list
+        ui::update_file_list(&mut self.ui_state)?;
+
         // Main event loop
         loop {
             // Draw the UI
-            terminal.draw(|f| ui::render(f, &self.ui_state, &self.input_state, &self.history))?;
+            terminal.draw(|f| ui::render(f, &mut self.ui_state, &self.input_state, &self.history))?;
 
             // Check if we should exit
             if self.should_quit {
@@ -81,6 +84,15 @@ impl App {
                 // Update the UI with new output
                 self.ui_state.output = self.executor.all_output();
                 self.ui_state.is_running = self.executor.is_running();
+
+                // If the command was a cd, update the file list
+                if !self.ui_state.is_running && self.ui_state.output.iter().any(|line| line.starts_with("Changed directory to:")) {
+                    // Update the current directory
+                    self.ui_state.current_dir = std::env::current_dir()?;
+
+                    // Update the file list
+                    ui::update_file_list(&mut self.ui_state)?;
+                }
             }
 
             // Check if it's time for a tick
@@ -103,6 +115,42 @@ impl App {
 
     /// Handle a key event
     fn handle_key_event(&mut self, key: KeyEvent) -> Result<()> {
+        // Check if we're waiting for a sudo password
+        if self.ui_state.sudo_password_prompt {
+            match key.code {
+                KeyCode::Esc => {
+                    // Cancel sudo password prompt
+                    self.ui_state.sudo_password_prompt = false;
+                    self.ui_state.sudo_password.clear();
+                    self.ui_state.sudo_command = None;
+                }
+                KeyCode::Enter => {
+                    // Submit the password
+                    if let Some(cmd) = self.ui_state.sudo_command.take() {
+                        // Execute the command with the password
+                        let password = self.ui_state.sudo_password.clone();
+                        self.ui_state.sudo_password.clear();
+                        self.ui_state.sudo_password_prompt = false;
+
+                        // Execute the command with the password
+                        self.executor.execute_sudo(&cmd, &password)?;
+                        self.ui_state.is_running = true;
+                    }
+                }
+                KeyCode::Char(c) => {
+                    // Add character to the password
+                    self.ui_state.sudo_password.push(c);
+                }
+                KeyCode::Backspace => {
+                    // Remove character from the password
+                    self.ui_state.sudo_password.pop();
+                }
+                _ => {}
+            }
+
+            return Ok(());
+        }
+
         // Check if we're editing a token
         if let Some(idx) = self.ui_state.editing_token {
             match key.code {
@@ -149,6 +197,10 @@ impl App {
                 // F2: Toggle history sidebar
                 self.ui_state.show_history = !self.ui_state.show_history;
             }
+            KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Ctrl+H: Alternative way to toggle history sidebar
+                self.ui_state.show_history = !self.ui_state.show_history;
+            }
             KeyCode::Enter => {
                 // Enter: Execute the command
                 let command = self.input_state.get_command();
@@ -156,9 +208,16 @@ impl App {
                     // Add to history
                     self.history.add(command.clone());
 
-                    // Execute the command
-                    self.executor.execute(&command)?;
-                    self.ui_state.is_running = true;
+                    // Check if this is a sudo command
+                    if command.trim().starts_with("sudo ") {
+                        // Prompt for password
+                        self.ui_state.sudo_password_prompt = true;
+                        self.ui_state.sudo_command = Some(command.clone());
+                    } else {
+                        // Execute the command
+                        self.executor.execute(&command)?;
+                        self.ui_state.is_running = true;
+                    }
 
                     // Clear the input
                     self.input_state.clear();
@@ -208,6 +267,10 @@ impl App {
                 // Calculate the input area
                 let input_start_y = (terminal_height as f32 * 0.85) as u16;
 
+                // Calculate the file list area
+                let file_list_start_y = (terminal_height as f32 * 0.51) as u16; // 85% * 60% = 51%
+                let file_list_end_y = input_start_y;
+
                 if mouse.row >= input_start_y {
                     // Click in the input area
                     if let Some(token_idx) = ui::get_token_at_position(
@@ -219,12 +282,62 @@ impl App {
                         self.input_state.start_editing(token_idx)?;
                         self.ui_state.editing_token = Some(token_idx);
                     }
+                } else if mouse.row >= file_list_start_y && mouse.row < file_list_end_y && !self.ui_state.show_history {
+                    // Click in the file list area (only if history sidebar is not shown)
+                    let file_area = ratatui::layout::Rect::new(0, file_list_start_y, size.0, file_list_end_y - file_list_start_y);
+
+                    if let Some(file_idx) = ui::get_file_at_position(&self.ui_state, mouse.row, file_area) {
+                        let file = &self.ui_state.files[file_idx];
+
+                        if file.is_dir {
+                            // Click on a directory - cd into it
+                            let cd_command = format!("cd {}", file.name);
+                            self.history.add(cd_command.clone());
+                            self.executor.execute(&cd_command)?;
+                            self.ui_state.is_running = true;
+                            self.input_state.clear();
+                        } else {
+                            // Click on a file - open with editor
+                            let edit_command = format!("sudo nano {}", file.name);
+                            self.history.add(edit_command.clone());
+
+                            // Prompt for password since this is a sudo command
+                            self.ui_state.sudo_password_prompt = true;
+                            self.ui_state.sudo_command = Some(edit_command.clone());
+                            self.input_state.clear();
+                        }
+                    }
                 } else if self.ui_state.show_history && mouse.column > (size.0 as f32 * 0.7) as u16 {
                     // Click in the history sidebar
                     let history_idx = mouse.row as usize;
                     if history_idx < self.history.len() {
                         if let Some(cmd) = self.history.get(history_idx) {
                             self.input_state.set_input(cmd.clone())?;
+                        }
+                    }
+                } else if mouse.row >= file_list_start_y && mouse.row < file_list_end_y && self.ui_state.show_history {
+                    // Click in the file list area when history sidebar is shown
+                    let file_area = ratatui::layout::Rect::new(0, file_list_start_y, (size.0 as f32 * 0.7) as u16, file_list_end_y - file_list_start_y);
+
+                    if let Some(file_idx) = ui::get_file_at_position(&self.ui_state, mouse.row, file_area) {
+                        let file = &self.ui_state.files[file_idx];
+
+                        if file.is_dir {
+                            // Click on a directory - cd into it
+                            let cd_command = format!("cd {}", file.name);
+                            self.history.add(cd_command.clone());
+                            self.executor.execute(&cd_command)?;
+                            self.ui_state.is_running = true;
+                            self.input_state.clear();
+                        } else {
+                            // Click on a file - open with editor
+                            let edit_command = format!("sudo nano {}", file.name);
+                            self.history.add(edit_command.clone());
+
+                            // Prompt for password since this is a sudo command
+                            self.ui_state.sudo_password_prompt = true;
+                            self.ui_state.sudo_command = Some(edit_command.clone());
+                            self.input_state.clear();
                         }
                     }
                 }
@@ -235,6 +348,10 @@ impl App {
                 let terminal_height = size.1;
                 let input_start_y = (terminal_height as f32 * 0.85) as u16;
 
+                // Calculate the file list area
+                let file_list_start_y = (terminal_height as f32 * 0.51) as u16; // 85% * 60% = 51%
+                let file_list_end_y = input_start_y;
+
                 if mouse.row >= input_start_y {
                     // Mouse over the input area
                     self.ui_state.hover_token = ui::get_token_at_position(
@@ -242,8 +359,20 @@ impl App {
                         mouse.column,
                         ratatui::layout::Rect::new(0, input_start_y, size.0, terminal_height - input_start_y),
                     );
+                    self.ui_state.hover_file = None;
+                } else if mouse.row >= file_list_start_y && mouse.row < file_list_end_y {
+                    // Mouse over the file list area
+                    let file_area = if self.ui_state.show_history {
+                        ratatui::layout::Rect::new(0, file_list_start_y, (size.0 as f32 * 0.7) as u16, file_list_end_y - file_list_start_y)
+                    } else {
+                        ratatui::layout::Rect::new(0, file_list_start_y, size.0, file_list_end_y - file_list_start_y)
+                    };
+
+                    self.ui_state.hover_file = ui::get_file_at_position(&self.ui_state, mouse.row, file_area);
+                    self.ui_state.hover_token = None;
                 } else {
                     self.ui_state.hover_token = None;
+                    self.ui_state.hover_file = None;
                 }
             }
             _ => {}
